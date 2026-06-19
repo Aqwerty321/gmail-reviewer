@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { Readable } from "node:stream";
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ImapFlow } from "imapflow";
@@ -60,6 +61,12 @@ function getConfigHelp() {
     suggestedPowerShellCopy: `Copy-Item \"${configPaths.envExamplePath}\" \"${configPaths.envPath}\"`,
     suggestedBashCopy: `cp \"${configPaths.envExamplePath}\" \"${configPaths.envPath}\"`
   };
+}
+
+function getArtifactPaths() {
+  const rootDir = path.dirname(configPaths.envPath);
+  const outputDir = path.join(rootDir, "search-results");
+  return { rootDir, outputDir };
 }
 
 function normalizeKeywords(values) {
@@ -139,6 +146,7 @@ function createResult(overrides = {}) {
     },
     top: DEFAULT_TOP,
     config: getConfigHelp(),
+    artifacts: null,
     searchesRun: [],
     matchedMessages: 0,
     processedMessages: 0,
@@ -305,6 +313,108 @@ function getCurrentDateString() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function getTimestampLabel() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function formatSearchMarkdown(result) {
+  const lines = [];
+  lines.push("# Gmail Search Result");
+  lines.push("");
+  lines.push(`- Status: ${result.ok ? "ok" : "error"}`);
+  lines.push(`- Email: ${result.email || "unknown"}`);
+  lines.push(`- Top: ${result.top}`);
+  lines.push(`- Grounded today: ${result.queryContext?.groundedToday || "unknown"}`);
+  lines.push(`- Effective since: ${result.queryContext?.effectiveSince || "none"}`);
+  lines.push(`- Keywords: ${result.keywords.join(", ")}`);
+  lines.push(`- From filter: ${result.filters?.from || "none"}`);
+  lines.push(`- Subject filter: ${result.filters?.subject || "none"}`);
+  lines.push(`- Candidate limit: ${result.queryContext?.candidateLimit || 0}`);
+  lines.push(`- Matched candidate messages: ${result.matchedMessages}`);
+  lines.push(`- Downloaded/processed messages: ${result.processedMessages}`);
+  lines.push(`- Returned messages: ${result.messages.length}`);
+  lines.push(`- Skipped messages: ${result.skippedMessages.length}`);
+  lines.push("");
+
+  if (result.error) {
+    lines.push("## Error");
+    lines.push("");
+    lines.push(result.error.message);
+    lines.push("");
+  }
+
+  lines.push("## Searches Run");
+  lines.push("");
+  for (const search of result.searchesRun) {
+    const variant = search.variant ? ` (${search.variant})` : "";
+    lines.push(`- ${search.keyword}${variant}: ${search.matches} matches`);
+  }
+  lines.push("");
+
+  lines.push("## Messages");
+  lines.push("");
+  if (result.messages.length === 0) {
+    lines.push("No matching messages returned.");
+  }
+
+  for (const message of result.messages) {
+    lines.push(`### ${message.cleanSubject || message.subject || "(no subject)"}`);
+    lines.push("");
+    lines.push(`- From: ${message.from || "unknown"}`);
+    lines.push(`- Date: ${message.date || "unknown"}`);
+    lines.push(`- Matched keywords: ${(message.matchedKeywords || []).join(", ") || "none"}`);
+    lines.push("");
+    if (message.bodyText) {
+      lines.push(message.bodyText);
+      lines.push("");
+    }
+  }
+
+  if (result.skippedMessages.length > 0) {
+    lines.push("## Skipped Messages");
+    lines.push("");
+    for (const skipped of result.skippedMessages) {
+      lines.push(`- UID ${skipped.uid}: ${skipped.message}`);
+    }
+    lines.push("");
+  }
+
+  return `${lines.join("\n").trim()}\n`;
+}
+
+async function persistResultArtifacts(result) {
+  const { outputDir } = getArtifactPaths();
+  const timestamp = getTimestampLabel();
+  const runJsonPath = path.join(outputDir, `${timestamp}.json`);
+  const runMarkdownPath = path.join(outputDir, `${timestamp}.md`);
+  const latestJsonPath = path.join(outputDir, "latest.json");
+  const latestMarkdownPath = path.join(outputDir, "latest.md");
+
+  await mkdir(outputDir, { recursive: true });
+
+  const artifacts = {
+    outputDir,
+    runJsonPath,
+    runMarkdownPath,
+    latestJsonPath,
+    latestMarkdownPath
+  };
+
+  const persistedResult = {
+    ...result,
+    artifacts
+  };
+
+  const markdown = formatSearchMarkdown(persistedResult);
+
+  await writeFile(runJsonPath, `${JSON.stringify(persistedResult, null, 2)}\n`, "utf8");
+  await writeFile(latestJsonPath, `${JSON.stringify(persistedResult, null, 2)}\n`, "utf8");
+  await writeFile(runMarkdownPath, markdown, "utf8");
+  await writeFile(latestMarkdownPath, markdown, "utf8");
+
+  return artifacts;
+}
+
 async function scourInbox({ email, password, keywords, from, subject, since, top }) {
   validateInputs({ email, password });
 
@@ -359,17 +469,78 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
       }
     }
 
-    if (searchMap.size < candidateLimit) {
+    const directCandidates = [...searchMap.values()]
+      .sort((first, second) => second.uid - first.uid)
+      .slice(0, candidateLimit);
+
+    result.matchedMessages = searchMap.size;
+    result.processedMessages = 0;
+
+    const processEntries = async (entries) => {
+      for (const entry of entries) {
+        result.processedMessages += 1;
+        try {
+          const source = await downloadSource(client, entry.uid);
+          const parsedMessage = await simpleParser(source);
+          const text = cleanMessageText(parsedMessage);
+          const subject = parsedMessage.subject || "";
+          const { matches, matchedKeywords } = messageMatchesFilters(parsedMessage, text, keywords, filters);
+
+          if (!matches) {
+            continue;
+          }
+
+          const extracted = extractSignals(text, matchedKeywords);
+          const { bodyText, bodyTruncated } = buildCleanBody(text);
+
+          result.messages.push({
+            uid: entry.uid,
+            subject: subject || null,
+            cleanSubject: subject.trim() || null,
+            from: parsedMessage.from?.text || null,
+            date: parsedMessage.date?.toISOString() || null,
+            matchedKeywords,
+            preview: buildPreview(text),
+            bodyText,
+            bodyTruncated,
+            reviewer: extracted.reviewer,
+            review: extracted.review,
+            rating: extracted.rating,
+            snippets: extracted.snippets
+          });
+        } catch (error) {
+          result.skippedMessages.push({
+            uid: entry.uid,
+            message: error instanceof Error ? error.message : String(error)
+          });
+          continue;
+        }
+
+        if (result.messages.length >= top) {
+          return true;
+        }
+      }
+
+      return false;
+    };
+
+    const filledFromDirect = await processEntries(directCandidates);
+
+    if (!filledFromDirect && result.messages.length < top) {
       const startSequence = Math.max(1, mailbox.exists - candidateLimit + 1);
       const recentSequenceRange = `${startSequence}:*`;
+      const recentFallback = [];
 
       for await (const message of client.fetch(recentSequenceRange, { uid: true })) {
         if (!message.uid) {
           continue;
         }
 
-        const entry = searchMap.get(message.uid) ?? { uid: message.uid, matchedKeywords: new Set() };
-        searchMap.set(message.uid, entry);
+        if (searchMap.has(message.uid)) {
+          continue;
+        }
+
+        recentFallback.push({ uid: message.uid, matchedKeywords: new Set() });
       }
 
       result.searchesRun.push({
@@ -383,57 +554,8 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
         matches: mailbox.exists,
         inspectedRange: recentSequenceRange
       });
-    }
 
-    const recentUids = [...searchMap.values()]
-      .sort((first, second) => second.uid - first.uid)
-      .slice(0, candidateLimit);
-
-    result.matchedMessages = searchMap.size;
-    result.processedMessages = 0;
-
-    for (const entry of recentUids) {
-      result.processedMessages += 1;
-      try {
-        const source = await downloadSource(client, entry.uid);
-        const parsedMessage = await simpleParser(source);
-        const text = cleanMessageText(parsedMessage);
-        const subject = parsedMessage.subject || "";
-        const { matches, matchedKeywords } = messageMatchesFilters(parsedMessage, text, keywords, filters);
-
-        if (!matches) {
-          continue;
-        }
-
-        const extracted = extractSignals(text, matchedKeywords);
-        const { bodyText, bodyTruncated } = buildCleanBody(text);
-
-        result.messages.push({
-          uid: entry.uid,
-          subject: subject || null,
-          cleanSubject: subject.trim() || null,
-          from: parsedMessage.from?.text || null,
-          date: parsedMessage.date?.toISOString() || null,
-          matchedKeywords,
-          preview: buildPreview(text),
-          bodyText,
-          bodyTruncated,
-          reviewer: extracted.reviewer,
-          review: extracted.review,
-          rating: extracted.rating,
-          snippets: extracted.snippets
-        });
-      } catch (error) {
-        result.skippedMessages.push({
-          uid: entry.uid,
-          message: error instanceof Error ? error.message : String(error)
-        });
-        continue;
-      }
-
-      if (result.messages.length >= top) {
-        break;
-      }
+      await processEntries(recentFallback);
     }
 
     result.ok = true;
@@ -461,6 +583,7 @@ async function main() {
   try {
     args = parseCliArgs();
     const result = await scourInbox(args);
+    result.artifacts = await persistResultArtifacts(result);
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {
     const message = error?.responseText || (error instanceof Error ? error.message : String(error));
@@ -483,6 +606,7 @@ async function main() {
       }
     });
 
+    result.artifacts = await persistResultArtifacts(result);
     console.log(JSON.stringify(result, null, 2));
     process.exitCode = 1;
   }

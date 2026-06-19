@@ -27,9 +27,11 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 10. Always use a result limit. The extractor defaults to `--top 10` when not specified, but set `--top` explicitly when the task calls for a different number of matches.
 11. Run the extractor from this folder with the inferred filters. Credentials should come from `.env` by default:
    `node scripts/scour.js --top 10 --keyword "invoice" --keyword "receipt" --from "billing@example.com" --subject "payment" --since "2026-01-01"`
-12. Review the JSON output. Each returned result includes `queryContext.groundedToday` and `queryContext.effectiveSince` for date grounding, plus clean `subject`, `cleanSubject`, and normalized `bodyText` so the agent can analyze and summarize the actual message contents instead of only a snippet. If the first pass is too broad or too narrow, refine keywords and filters, then rerun the extractor.
-13. Repeat the search loop until the returned messages fit the user's task.
-14. Summarize the matching emails clearly for the user, using the clean subject and body text fields.
+12. Review the JSON output. Each returned result includes `queryContext.groundedToday` and `queryContext.effectiveSince` for date grounding, plus clean `subject`, `cleanSubject`, and normalized `bodyText` so the agent can analyze and summarize the actual message contents instead of only a snippet.
+13. Read the persisted Markdown summary at `search-results/latest.md` for a human-friendly view, or `search-results/latest.json` for structured automation. The script also writes timestamped history files in the same folder.
+14. If the first pass is too broad or too narrow, refine keywords and filters, then rerun the extractor.
+15. Repeat the search loop until the returned messages fit the user's task.
+16. Summarize the matching emails clearly for the user, using the clean subject and body text fields.
 
 ## Learned Tactics
 - IMAP body searches are noisy, so trust the extractor's post-fetch filtering more than raw match counts.
@@ -43,6 +45,7 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 - The extractor supports repeated `--keyword` flags and unions the matches across searches.
 - Each keyword is searched across message body, subject, and sender fields before post-fetch filtering is applied.
 - The extractor defaults to the top 10 matching results unless `--top` is specified.
+- Search results are persisted locally under `search-results/` as both Markdown and JSON, with `latest.*` pointers for the most recent run.
 - The agent is expected to generate and refine keyword, sender, subject, and date filters interactively from the user's request rather than relying on `.env` for those values.
 - The agent should handhold setup: create `.env` from `.env.example` when missing, point the user at the exact file path, and pause until the user fills credentials locally.
 - The script loads credentials from the nearest `.env` file it can find, and prints structured JSON to stdout for both success and failure cases.

@@ -15,6 +15,7 @@ It connects to Gmail with an App Password, searches the inbox with repeated keyw
 - sender-address-aware keyword matching
 - clean `subject`, `cleanSubject`, and `bodyText` fields for message analysis
 - resilient per-message error handling with `skippedMessages`
+- persistent Markdown and JSON search artifacts in `search-results/`
 
 ## Requirements
 
@@ -79,8 +80,15 @@ The script returns structured JSON with fields such as:
 - `processedMessages`
 - `skippedMessages`
 - `messages`
+- `artifacts`
 
 Each message includes clean, readable fields such as `subject`, `cleanSubject`, `preview`, and `bodyText` so downstream agents can analyze the actual content.
+
+Each run also writes:
+
+- `search-results/latest.md`
+- `search-results/latest.json`
+- timestamped history files in `search-results/`
 
 ## Search Tips
 
@@ -93,3 +101,4 @@ Each message includes clean, readable fields such as `subject`, `cleanSubject`, 
 
 - Credentials are loaded from the nearest `.env` file the script can find.
 - Missing or malformed config returns structured JSON with exact file paths and suggested copy commands.
+- Search artifacts are local runtime output and should not be committed.
