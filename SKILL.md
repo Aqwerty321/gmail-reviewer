@@ -19,20 +19,22 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 2. Ensure the workspace `.env` file exists and contains only `GMAIL_EMAIL` and `GMAIL_APP_PASSWORD`.
 3. If `.env` is missing, automatically create it from `.env.example` using the host-appropriate equivalent of copying the file, for example `Copy-Item .env.example .env` in PowerShell or `cp .env.example .env` in bash.
 4. After creating `.env`, tell the user the exact `.env` path in their workspace and explicitly ask them to open it on their machine and fill in `GMAIL_EMAIL` and `GMAIL_APP_PASSWORD` before continuing.
-5. If credentials are still missing or malformed, stop the search, show the user the exact `.env` and `.env.example` paths, and tell them what value is missing.
-6. The extractor sanitizes whitespace in the configured App Password automatically.
-7. Ground relative dates before searching. Convert requests like "past week", "last month", or "since yesterday" into an explicit `YYYY-MM-DD` value using the current date at runtime, and pass that absolute date through `--since`.
-8. Translate the user's task into a search plan. Choose 2-6 likely inbox keywords or short phrases, and infer optional `from`, `subject`, and `since` filters when the request suggests them. If those constraints would help but are not clear, ask the user a brief follow-up before running the search.
-9. For company or recruiter hunts, prefer a mixed keyword set: company name, domain variant, sender-address fragment, and one or two workflow terms. Example: `toolhouse`, `toolhouseai`, `toolhouse.ai`, `@toolhouseai.com`, `interview`, `application`.
-10. Always use a result limit. The extractor defaults to `--top 10` when not specified, but set `--top` explicitly when the task calls for a different number of matches.
-11. Run the extractor from this folder with the inferred filters. Credentials should come from `.env` by default:
+5. If the user does not know how to create a Gmail App Password, explicitly guide them to Google's App Password page: `https://myaccount.google.com/apppasswords`.
+6. Tell the user they may need to sign in and enable 2-Step Verification first. Then tell them to create a new app password, give it any descriptive app name they like, copy the generated 16-character password, and paste that value into `GMAIL_APP_PASSWORD` in `.env` without extra spaces.
+7. If credentials are still missing or malformed, stop the search, show the user the exact `.env` and `.env.example` paths, and tell them what value is missing.
+8. The extractor sanitizes whitespace in the configured App Password automatically.
+9. Ground relative dates before searching. Convert requests like "past week", "last month", or "since yesterday" into an explicit `YYYY-MM-DD` value using the current date at runtime, and pass that absolute date through `--since`.
+10. Translate the user's task into a search plan. Choose 2-6 likely inbox keywords or short phrases, and infer optional `from`, `subject`, and `since` filters when the request suggests them. If those constraints would help but are not clear, ask the user a brief follow-up before running the search.
+11. For company or recruiter hunts, prefer a mixed keyword set: company name, domain variant, sender-address fragment, and one or two workflow terms. Example: `toolhouse`, `toolhouseai`, `toolhouse.ai`, `@toolhouseai.com`, `interview`, `application`.
+12. Always use a result limit. The extractor defaults to `--top 10` when not specified, but set `--top` explicitly when the task calls for a different number of matches.
+13. Run the extractor from this folder with the inferred filters. Credentials should come from `.env` by default:
    `node scripts/scour.js --top 10 --keyword "invoice" --keyword "receipt" --from "billing@example.com" --subject "payment" --since "2026-01-01"`
-12. Review the JSON output. Each returned result includes `queryContext.groundedToday` and `queryContext.effectiveSince` for date grounding, plus clean `subject`, `cleanSubject`, and normalized `bodyText` so the agent can analyze and summarize the actual message contents instead of only a snippet.
-13. Read the persisted Markdown summary at `search-results/latest.md` for a human-friendly view, or `search-results/latest.json` for structured automation. The script also writes timestamped history files in the same folder.
-14. After reading `search-results/latest.md` or `search-results/latest.json`, you must summarize the findings back to the user in chat. Do not stop at writing files only.
-15. If the first pass is too broad or too narrow, refine keywords and filters, then rerun the extractor.
-16. Repeat the search loop until the returned messages fit the user's task.
-17. Summarize the matching emails clearly for the user, using the clean subject and body text fields.
+14. Review the JSON output. Each returned result includes `queryContext.groundedToday` and `queryContext.effectiveSince` for date grounding, plus clean `subject`, `cleanSubject`, and normalized `bodyText` so the agent can analyze and summarize the actual message contents instead of only a snippet.
+15. Read the persisted Markdown summary at `search-results/latest.md` for a human-friendly view, or `search-results/latest.json` for structured automation. The script also writes timestamped history files in the same folder.
+16. After reading `search-results/latest.md` or `search-results/latest.json`, you must summarize the findings back to the user in chat. Do not stop at writing files only.
+17. If the first pass is too broad or too narrow, refine keywords and filters, then rerun the extractor.
+18. Repeat the search loop until the returned messages fit the user's task.
+19. Summarize the matching emails clearly for the user, using the clean subject and body text fields.
 
 ## Learned Tactics
 - IMAP body searches are noisy, so trust the extractor's post-fetch filtering more than raw match counts.
@@ -50,5 +52,6 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 - Persisting results to files is not sufficient by itself; the agent must read the latest result file and report the findings to the user.
 - The agent is expected to generate and refine keyword, sender, subject, and date filters interactively from the user's request rather than relying on `.env` for those values.
 - The agent should handhold setup: create `.env` from `.env.example` when missing, point the user at the exact file path, and pause until the user fills credentials locally.
+- The agent should also handhold Gmail App Password setup when needed by pointing the user to `https://myaccount.google.com/apppasswords` and explaining the short creation flow.
 - The script loads credentials from the nearest `.env` file it can find, and prints structured JSON to stdout for both success and failure cases.
 - The extraction backend is [scripts/scour.js](./scripts/scour.js).
