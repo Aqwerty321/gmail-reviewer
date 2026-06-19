@@ -1,0 +1,19 @@
+{
+  "name": "gmail-reviewer",
+  "version": "1.0.0",
+  "description": "Scour a Gmail inbox for customer reviews using IMAP.",
+  "type": "module",
+  "main": "scripts/scour.js",
+  "scripts": {
+    "start": "node scripts/scour.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "dotenv": "^16.6.1",
+    "imapflow": "^1.4.1",
+    "mailparser": "^3.9.10"
+  },
+  "overrides": {
+    "nodemailer": "^9.0.1"
+  }
+}
