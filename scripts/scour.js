@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import { Readable } from "node:stream";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ImapFlow } from "imapflow";
@@ -68,7 +68,8 @@ function getArtifactPaths() {
   const rootDir = path.dirname(configPaths.envPath);
   const outputDir = path.join(rootDir, "search-results");
   const sentEmailDir = path.join(rootDir, "sent-emails");
-  return { rootDir, outputDir, sentEmailDir };
+  const contactsDir = path.join(rootDir, "interaction-contacts");
+  return { rootDir, outputDir, sentEmailDir, contactsDir };
 }
 
 function normalizeKeywords(values) {
@@ -79,6 +80,12 @@ function normalizeKeywords(values) {
 
 function normalizeRecipients(values) {
   const entries = (values ?? []).flatMap((value) => value.split(","));
+  return [...new Set(entries.map((value) => value.trim()).filter(Boolean))];
+}
+
+function normalizeTrackedSenders(values) {
+  const envEntries = process.env.TRACKED_SENDERS ? process.env.TRACKED_SENDERS.split(",") : [];
+  const entries = [...(values ?? []), ...envEntries].flatMap((value) => value.split(","));
   return [...new Set(entries.map((value) => value.trim()).filter(Boolean))];
 }
 
@@ -131,7 +138,8 @@ function parseCliArgs() {
       "send-subject": { type: "string" },
       "send-body": { type: "string" },
       "send-from-name": { type: "string" },
-      "dry-run-send": { type: "boolean" }
+      "dry-run-send": { type: "boolean" },
+      "tracked-sender": { type: "string", multiple: true }
     }
   });
 
@@ -143,6 +151,7 @@ function parseCliArgs() {
     subject: normalizeOptionalString(values.subject),
     since: normalizeSince(values.since),
     top: normalizeTop(values.top),
+    trackedSenders: normalizeTrackedSenders(values["tracked-sender"]),
     send: {
       to: normalizeRecipients(values["send-to"]),
       subject: normalizeOptionalString(values["send-subject"]),
@@ -161,7 +170,8 @@ function createResult(overrides = {}) {
     filters: {
       from: null,
       subject: null,
-      since: null
+      since: null,
+      trackedSenders: []
     },
     top: DEFAULT_TOP,
     config: getConfigHelp(),
@@ -177,6 +187,7 @@ function createResult(overrides = {}) {
       sent: [],
       failed: []
     },
+    sentEmailInteractions: [],
     error: null,
     ...overrides
   };
@@ -262,26 +273,62 @@ function extractSignals(text, matchedKeywords) {
   };
 }
 
-function getMatchedKeywords(text, subject, fromText, keywords) {
-  const haystack = `${fromText} ${subject} ${text}`.toLowerCase();
+function getAddressText(addressGroup) {
+  return addressGroup?.text || "";
+}
+
+function getAttachmentMetadata(parsedMessage) {
+  return (parsedMessage.attachments || []).map((attachment) => ({
+    filename: attachment.filename || null,
+    contentType: attachment.contentType || null,
+    size: attachment.size || null,
+    contentId: attachment.contentId || null
+  }));
+}
+
+function getMessageSearchText(parsedMessage, text) {
+  const attachmentText = getAttachmentMetadata(parsedMessage)
+    .map((attachment) => `${attachment.filename || ""} ${attachment.contentType || ""}`)
+    .join(" ");
+
+  return [
+    getAddressText(parsedMessage.from),
+    getAddressText(parsedMessage.to),
+    getAddressText(parsedMessage.cc),
+    getAddressText(parsedMessage.bcc),
+    parsedMessage.subject || "",
+    attachmentText,
+    text
+  ].join(" ");
+}
+
+function getMatchedKeywords(searchText, keywords) {
+  const haystack = searchText.toLowerCase();
   return keywords.filter((keyword) => haystack.includes(keyword.toLowerCase()));
+}
+
+function getMatchedTrackedSenders(searchText, trackedSenders) {
+  const haystack = searchText.toLowerCase();
+  return trackedSenders.filter((sender) => haystack.includes(sender.toLowerCase()));
 }
 
 function messageMatchesFilters(parsedMessage, text, keywords, filters) {
   const subject = parsedMessage.subject || "";
   const fromText = parsedMessage.from?.text || "";
-  const matchedKeywords = getMatchedKeywords(text, subject, fromText, keywords);
+  const searchText = getMessageSearchText(parsedMessage, text);
+  const matchedKeywords = getMatchedKeywords(searchText, keywords);
+  const matchedTrackedSenders = getMatchedTrackedSenders(searchText, filters.trackedSenders || []);
 
-  if (matchedKeywords.length === 0) {
-    return { matches: false, matchedKeywords };
+  if (matchedKeywords.length === 0 && matchedTrackedSenders.length === 0) {
+    return { matches: false, matchedKeywords, matchedTrackedSenders };
   }
 
   if (filters.from && !fromText.toLowerCase().includes(filters.from.toLowerCase())) {
-    return { matches: false, matchedKeywords };
+    return { matches: false, matchedKeywords, matchedTrackedSenders };
   }
 
   if (filters.subject && !subject.toLowerCase().includes(filters.subject.toLowerCase())) {
-    return { matches: false, matchedKeywords };
+    return { matches: false, matchedKeywords, matchedTrackedSenders };
   }
 
   if (filters.since) {
@@ -289,11 +336,11 @@ function messageMatchesFilters(parsedMessage, text, keywords, filters) {
     const sinceDate = new Date(filters.since);
 
     if (!messageDate || messageDate < sinceDate) {
-      return { matches: false, matchedKeywords };
+      return { matches: false, matchedKeywords, matchedTrackedSenders };
     }
   }
 
-  return { matches: true, matchedKeywords };
+  return { matches: true, matchedKeywords, matchedTrackedSenders };
 }
 
 function buildPreview(text) {
@@ -328,6 +375,56 @@ function buildSearchVariants(keyword, filters) {
   }
 
   return DEFAULT_SEARCH_VARIANTS;
+}
+
+function buildSentEmailSearchText(record) {
+  return [record.from, record.to, record.subject, record.body, record.status, record.messageId].filter(Boolean).join(" ");
+}
+
+async function findSentEmailInteractions({ keywords, trackedSenders }) {
+  const { sentEmailDir } = getArtifactPaths();
+
+  if (!existsSync(sentEmailDir)) {
+    return [];
+  }
+
+  const entries = await readdir(sentEmailDir, { withFileTypes: true });
+  const jsonFiles = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json") && entry.name !== "latest.json")
+    .map((entry) => path.join(sentEmailDir, entry.name));
+  const matches = [];
+
+  for (const filePath of jsonFiles) {
+    try {
+      const record = JSON.parse(await readFile(filePath, "utf8"));
+      const searchText = buildSentEmailSearchText(record);
+      const matchedKeywords = getMatchedKeywords(searchText, keywords);
+      const matchedTrackedSenders = getMatchedTrackedSenders(searchText, trackedSenders);
+
+      if (matchedKeywords.length === 0 && matchedTrackedSenders.length === 0) {
+        continue;
+      }
+
+      matches.push({
+        source: "sent-emails",
+        filePath,
+        timestamp: record.timestamp,
+        status: record.status,
+        dryRun: record.dryRun,
+        from: record.from,
+        to: record.to,
+        subject: record.subject,
+        body: record.body,
+        messageId: record.messageId,
+        matchedKeywords,
+        matchedTrackedSenders
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return matches.sort((first, second) => new Date(second.timestamp) - new Date(first.timestamp)).slice(0, 25);
 }
 
 function buildSearchCriteria(keyword, filters, variant) {
@@ -389,6 +486,175 @@ function formatSentEmailMarkdown(record) {
   return lines.join("\n");
 }
 
+function extractEmailAddresses(value) {
+  if (!value) {
+    return [];
+  }
+
+  return [...new Set(String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])];
+}
+
+function recordContact(contactMap, address, details) {
+  if (!address) {
+    return;
+  }
+
+  const normalized = address.toLowerCase();
+  const current = contactMap.get(normalized) || {
+    email: normalized,
+    sources: [],
+    roles: [],
+    firstSeen: details.timestamp,
+    lastSeen: details.timestamp,
+    count: 0,
+    samples: []
+  };
+
+  current.count += 1;
+  current.firstSeen = current.firstSeen && current.firstSeen < details.timestamp ? current.firstSeen : details.timestamp;
+  current.lastSeen = current.lastSeen && current.lastSeen > details.timestamp ? current.lastSeen : details.timestamp;
+
+  if (details.source && !current.sources.includes(details.source)) {
+    current.sources.push(details.source);
+  }
+
+  if (details.role && !current.roles.includes(details.role)) {
+    current.roles.push(details.role);
+  }
+
+  current.samples = [
+    {
+      timestamp: details.timestamp,
+      source: details.source,
+      role: details.role,
+      subject: details.subject || null,
+      status: details.status || null
+    },
+    ...current.samples
+  ].slice(0, 10);
+
+  contactMap.set(normalized, current);
+}
+
+function collectContactsFromResult(result) {
+  const contactMap = new Map();
+  const now = new Date().toISOString();
+
+  for (const trackedSender of result.filters?.trackedSenders || []) {
+    for (const address of extractEmailAddresses(trackedSender)) {
+      recordContact(contactMap, address, { timestamp: now, source: "tracked-sender", role: "tracked" });
+    }
+  }
+
+  for (const message of result.messages || []) {
+    const timestamp = message.date || now;
+    const subject = message.cleanSubject || message.subject || null;
+
+    for (const address of extractEmailAddresses(message.from)) {
+      recordContact(contactMap, address, { timestamp, source: "gmail-message", role: "from", subject });
+    }
+
+    for (const address of extractEmailAddresses(message.to)) {
+      recordContact(contactMap, address, { timestamp, source: "gmail-message", role: "to", subject });
+    }
+
+    for (const address of extractEmailAddresses(message.cc)) {
+      recordContact(contactMap, address, { timestamp, source: "gmail-message", role: "cc", subject });
+    }
+
+    for (const address of extractEmailAddresses(message.bcc)) {
+      recordContact(contactMap, address, { timestamp, source: "gmail-message", role: "bcc", subject });
+    }
+  }
+
+  for (const interaction of result.sentEmailInteractions || []) {
+    const timestamp = interaction.timestamp || now;
+    const subject = interaction.subject || null;
+
+    for (const address of extractEmailAddresses(interaction.from)) {
+      recordContact(contactMap, address, { timestamp, source: "sent-email-ledger", role: "from", subject, status: interaction.status });
+    }
+
+    for (const address of extractEmailAddresses(interaction.to)) {
+      recordContact(contactMap, address, { timestamp, source: "sent-email-ledger", role: "to", subject, status: interaction.status });
+    }
+  }
+
+  for (const sent of result.emailActions?.sent || []) {
+    for (const address of extractEmailAddresses(sent.to)) {
+      recordContact(contactMap, address, { timestamp: now, source: "email-action", role: "to", subject: sent.subject, status: sent.status });
+    }
+  }
+
+  for (const failed of result.emailActions?.failed || []) {
+    for (const address of extractEmailAddresses(failed.to)) {
+      recordContact(contactMap, address, { timestamp: now, source: "email-action", role: "to", subject: failed.subject, status: "failed" });
+    }
+  }
+
+  return [...contactMap.values()].sort((first, second) => second.lastSeen.localeCompare(first.lastSeen));
+}
+
+function formatContactsMarkdown(contacts) {
+  const lines = ["# Interaction Contacts", ""];
+
+  if (contacts.length === 0) {
+    lines.push("No contacts found in the latest run.");
+    return `${lines.join("\n")}\n`;
+  }
+
+  for (const contact of contacts) {
+    lines.push(`## ${contact.email}`);
+    lines.push("");
+    lines.push(`- Sources: ${contact.sources.join(", ") || "none"}`);
+    lines.push(`- Roles: ${contact.roles.join(", ") || "none"}`);
+    lines.push(`- First seen: ${contact.firstSeen}`);
+    lines.push(`- Last seen: ${contact.lastSeen}`);
+    lines.push(`- Interaction count in latest run: ${contact.count}`);
+    lines.push("");
+
+    for (const sample of contact.samples.slice(0, 3)) {
+      lines.push(`- ${sample.timestamp} [${sample.source}/${sample.role}] ${sample.subject || "(no subject)"}`);
+    }
+
+    lines.push("");
+  }
+
+  return `${lines.join("\n").trim()}\n`;
+}
+
+async function persistInteractionContacts(result) {
+  const { contactsDir } = getArtifactPaths();
+  const timestamp = getTimestampLabel();
+  const contacts = collectContactsFromResult(result);
+  const runJsonPath = path.join(contactsDir, `${timestamp}.json`);
+  const runMarkdownPath = path.join(contactsDir, `${timestamp}.md`);
+  const latestJsonPath = path.join(contactsDir, "latest.json");
+  const latestMarkdownPath = path.join(contactsDir, "latest.md");
+
+  await mkdir(contactsDir, { recursive: true });
+
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    contacts
+  };
+  const markdown = formatContactsMarkdown(contacts);
+
+  await writeFile(runJsonPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  await writeFile(latestJsonPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  await writeFile(runMarkdownPath, markdown, "utf8");
+  await writeFile(latestMarkdownPath, markdown, "utf8");
+
+  return {
+    contactsDir,
+    runJsonPath,
+    runMarkdownPath,
+    latestJsonPath,
+    latestMarkdownPath,
+    contactCount: contacts.length
+  };
+}
+
 async function persistSentEmailRecord(record) {
   const { sentEmailDir } = getArtifactPaths();
   const timestamp = record.timestamp.replace(/[:.]/g, "-");
@@ -420,6 +686,7 @@ function formatSearchMarkdown(result) {
   lines.push(`- Keywords: ${result.keywords.join(", ")}`);
   lines.push(`- From filter: ${result.filters?.from || "none"}`);
   lines.push(`- Subject filter: ${result.filters?.subject || "none"}`);
+  lines.push(`- Tracked senders: ${(result.filters?.trackedSenders || []).join(", ") || "none"}`);
   lines.push(`- Candidate limit: ${result.queryContext?.candidateLimit || 0}`);
   lines.push(`- Matched candidate messages: ${result.matchedMessages}`);
   lines.push(`- Downloaded/processed messages: ${result.processedMessages}`);
@@ -428,6 +695,7 @@ function formatSearchMarkdown(result) {
   lines.push(`- Emails requested: ${result.emailActions.requested ? "yes" : "no"}`);
   lines.push(`- Emails sent: ${result.emailActions.sent.length}`);
   lines.push(`- Email send failures: ${result.emailActions.failed.length}`);
+  lines.push(`- Sent-email interaction matches: ${result.sentEmailInteractions.length}`);
   lines.push("");
 
   if (result.error) {
@@ -455,8 +723,15 @@ function formatSearchMarkdown(result) {
     lines.push(`### ${message.cleanSubject || message.subject || "(no subject)"}`);
     lines.push("");
     lines.push(`- From: ${message.from || "unknown"}`);
+    lines.push(`- To: ${message.to || "unknown"}`);
     lines.push(`- Date: ${message.date || "unknown"}`);
     lines.push(`- Matched keywords: ${(message.matchedKeywords || []).join(", ") || "none"}`);
+    lines.push(`- Matched tracked senders: ${(message.matchedTrackedSenders || []).join(", ") || "none"}`);
+
+    if (message.attachmentNames?.length > 0) {
+      lines.push(`- Attachments: ${message.attachmentNames.join(", ")}`);
+    }
+
     lines.push("");
     if (message.bodyText) {
       lines.push(message.bodyText);
@@ -471,6 +746,28 @@ function formatSearchMarkdown(result) {
       lines.push(`- UID ${skipped.uid}: ${skipped.message}`);
     }
     lines.push("");
+  }
+
+  if (result.sentEmailInteractions.length > 0) {
+    lines.push("## Sent Email Interactions");
+    lines.push("");
+
+    for (const interaction of result.sentEmailInteractions) {
+      lines.push(`### ${interaction.subject || "(no subject)"}`);
+      lines.push("");
+      lines.push(`- Timestamp: ${interaction.timestamp || "unknown"}`);
+      lines.push(`- Status: ${interaction.status || "unknown"}`);
+      lines.push(`- From: ${interaction.from || "unknown"}`);
+      lines.push(`- To: ${interaction.to || "unknown"}`);
+      lines.push(`- Matched keywords: ${(interaction.matchedKeywords || []).join(", ") || "none"}`);
+      lines.push(`- Matched tracked senders: ${(interaction.matchedTrackedSenders || []).join(", ") || "none"}`);
+      lines.push("");
+
+      if (interaction.body) {
+        lines.push(interaction.body);
+        lines.push("");
+      }
+    }
   }
 
   if (result.emailActions.requested) {
@@ -614,11 +911,11 @@ async function persistResultArtifacts(result) {
   return artifacts;
 }
 
-async function scourInbox({ email, password, keywords, from, subject, since, top, send }) {
+async function scourInbox({ email, password, keywords, from, subject, since, top, trackedSenders, send }) {
   validateInputs({ email, password });
   validateSendRequest(send);
 
-  const filters = { from, subject, since };
+  const filters = { from, subject, since, trackedSenders };
   const candidateLimit = buildCandidateLimit(top);
   const groundedToday = getCurrentDateString();
 
@@ -669,6 +966,20 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
       }
     }
 
+    for (const trackedSender of trackedSenders) {
+      for (const variant of ["from", "to", "cc"]) {
+        const criteria = buildSearchCriteria(trackedSender, filters, variant);
+        const matchingUids = await client.search(criteria);
+        result.searchesRun.push({ keyword: trackedSender, variant: `tracked-${variant}`, criteria: { ...filters }, matches: matchingUids.length });
+
+        for (const uid of matchingUids) {
+          const entry = searchMap.get(uid) ?? { uid, matchedKeywords: new Set() };
+          entry.matchedKeywords.add(trackedSender);
+          searchMap.set(uid, entry);
+        }
+      }
+    }
+
     const directCandidates = [...searchMap.values()]
       .sort((first, second) => second.uid - first.uid)
       .slice(0, candidateLimit);
@@ -684,7 +995,7 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
           const parsedMessage = await simpleParser(source);
           const text = cleanMessageText(parsedMessage);
           const subject = parsedMessage.subject || "";
-          const { matches, matchedKeywords } = messageMatchesFilters(parsedMessage, text, keywords, filters);
+          const { matches, matchedKeywords, matchedTrackedSenders } = messageMatchesFilters(parsedMessage, text, keywords, filters);
 
           if (!matches) {
             continue;
@@ -692,6 +1003,7 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
 
           const extracted = extractSignals(text, matchedKeywords);
           const { bodyText, bodyTruncated } = buildCleanBody(text);
+          const attachments = getAttachmentMetadata(parsedMessage);
 
           result.messages.push({
             uid: entry.uid,
@@ -700,6 +1012,12 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
             from: parsedMessage.from?.text || null,
             date: parsedMessage.date?.toISOString() || null,
             matchedKeywords,
+            matchedTrackedSenders,
+            to: parsedMessage.to?.text || null,
+            cc: parsedMessage.cc?.text || null,
+            bcc: parsedMessage.bcc?.text || null,
+            attachments,
+            attachmentNames: attachments.map((attachment) => attachment.filename).filter(Boolean),
             preview: buildPreview(text),
             bodyText,
             bodyTruncated,
@@ -758,6 +1076,7 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
       await processEntries(recentFallback);
     }
 
+    result.sentEmailInteractions = await findSentEmailInteractions({ keywords, trackedSenders });
     result.ok = true;
   result.emailActions = await sendEmails({ email, password, send });
     return result;
@@ -779,6 +1098,7 @@ async function main() {
     subject: null,
     since: null,
     top: DEFAULT_TOP,
+    trackedSenders: [],
     send: {
       to: [],
       subject: null,
@@ -791,6 +1111,7 @@ async function main() {
   try {
     args = parseCliArgs();
     const result = await scourInbox(args);
+    result.contactArtifacts = await persistInteractionContacts(result);
     result.artifacts = await persistResultArtifacts(result);
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {
@@ -801,7 +1122,8 @@ async function main() {
       filters: {
         from: args.from,
         subject: args.subject,
-        since: args.since
+        since: args.since,
+        trackedSenders: args.trackedSenders
       },
       top: args.top,
       queryContext: {

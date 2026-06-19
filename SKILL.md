@@ -24,16 +24,16 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 7. If credentials are still missing or malformed, stop the search, show the user the exact `.env` and `.env.example` paths, and tell them what value is missing.
 8. The extractor sanitizes whitespace in the configured App Password automatically.
 9. Ground relative dates before searching. Convert requests like "past week", "last month", or "since yesterday" into an explicit `YYYY-MM-DD` value using the current date at runtime, and pass that absolute date through `--since`.
-10. Translate the user's task into a search plan. Choose 2-6 likely inbox keywords or short phrases, and infer optional `from`, `subject`, and `since` filters when the request suggests them. Be proactive about asking concise follow-up questions when sender, date range, recipient, tone, or desired action is unclear.
+10. Translate the user's task into a search plan. Choose 2-6 likely inbox keywords or short phrases, and infer optional `from`, `subject`, `since`, and `tracked-sender` filters when the request suggests them. Be proactive about asking concise follow-up questions when customer name, sender, recipient, date range, tone, or desired action is unclear.
 11. For company or recruiter hunts, prefer a mixed keyword set: company name, domain variant, sender-address fragment, and one or two workflow terms. Example: `toolhouse`, `toolhouseai`, `toolhouse.ai`, `@toolhouseai.com`, `interview`, `application`.
 12. Always use a result limit. The extractor defaults to `--top 10` when not specified, but set `--top` explicitly when the task calls for a different number of matches.
 13. Run the extractor from this folder with the inferred filters. Credentials should come from `.env` by default:
-   `node scripts/scour.js --top 10 --keyword "invoice" --keyword "receipt" --from "billing@example.com" --subject "payment" --since "2026-01-01"`
+   `node scripts/scour.js --top 10 --keyword "invoice" --keyword "receipt" --from "billing@example.com" --tracked-sender "customer@example.com" --subject "payment" --since "2026-01-01"`
 14. If the user asks to send an email, draft it in natural, proper human language with a warm and welcoming tone unless the user asks for a different style. Keep the wording flexible to the user's goal, relationship with the recipient, and requested level of formality.
 15. Before sending, show the user a clear preview containing the recipient list, subject, and full body. Ask whether they want to send it as-is or refine it further. Do not send until the user explicitly approves the preview.
 16. After approval, send with `--send-to`, `--send-subject`, and `--send-body`; use `--dry-run-send` when validating a workflow without sending. Every dry-run, successful send, or failed send is recorded under `sent-emails/` with timestamp, recipient, subject, body, status, message ID, and error details when relevant.
 17. For review-request outreach, keep it generic: search for the target customers, decide recipients from verified message context or user-provided addresses, draft a warm request, preview it for the user, then send only after approval.
-18. Review the JSON output. Each returned result includes `queryContext.groundedToday` and `queryContext.effectiveSince` for date grounding, plus clean `subject`, `cleanSubject`, and normalized `bodyText` so the agent can analyze and summarize the actual message contents instead of only a snippet. Sent email attempts are recorded under `emailActions`.
+18. Review the JSON output. Each returned result includes `queryContext.groundedToday` and `queryContext.effectiveSince` for date grounding, plus clean `subject`, `cleanSubject`, normalized `bodyText`, `attachmentNames`, and `attachments` so the agent can analyze and summarize the actual message contents and attachment metadata instead of only a snippet. Sent email attempts are recorded under `emailActions`, matching local outbound history appears under `sentEmailInteractions`, and discovered contact records appear under `contactArtifacts`.
 19. Read the persisted Markdown summary at `search-results/latest.md` for a human-friendly view, or `search-results/latest.json` for structured automation. The script also writes timestamped history files in the same folder.
 20. After reading `search-results/latest.md` or `search-results/latest.json`, you must summarize the findings back to the user in chat. Do not stop at writing files only.
 21. If the first pass is too broad or too narrow, refine keywords and filters, then rerun the extractor.
@@ -57,6 +57,8 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 ## Notes
 - The extractor supports repeated `--keyword` flags and unions the matches across searches.
 - Each keyword is searched across message body, subject, and sender fields before post-fetch filtering is applied.
+- Attachment filenames and content types are included in post-fetch matching, so invoice/payment searches can match files such as `invoice.pdf` even when the body is sparse.
+- Use `--tracked-sender` for known customer names, email addresses, or domains. Tracked senders are searched across inbound senders and outbound/recipient fields.
 - The extractor defaults to the top 10 matching results unless `--top` is specified.
 - Search results are persisted locally under `search-results/` as both Markdown and JSON, with `latest.*` pointers for the most recent run.
 - Persisting results to files is not sufficient by itself; the agent must read the latest result file and report the findings to the user.
@@ -64,6 +66,8 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 - Never send outreach silently. The agent must obtain explicit user approval for recipients and copy before sending.
 - The user must be allowed to choose either "send it" or "refine it further" after seeing the draft preview.
 - Sent email records are persisted locally under `sent-emails/` as both Markdown and JSON, with `latest.*` pointers for the most recent send action.
+- Searches also inspect `sent-emails/` and expose matching outbound history as `sentEmailInteractions`, helping identify customers contacted by previous sends.
+- Every run writes an interaction contact index under `interaction-contacts/`, capturing tracked senders plus senders/recipients discovered through inbox messages, sent-email actions, and sent-email history.
 - The agent is expected to generate and refine keyword, sender, subject, and date filters interactively from the user's request rather than relying on `.env` for those values.
 - The agent should handhold setup: create `.env` from `.env.example` when missing, point the user at the exact file path, and pause until the user fills credentials locally.
 - The agent should also handhold Gmail App Password setup when needed by pointing the user to `https://myaccount.google.com/apppasswords` and explaining the short creation flow.

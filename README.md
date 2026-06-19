@@ -11,12 +11,15 @@ It connects to Gmail with an App Password, searches the inbox with repeated keyw
 - repeated `--keyword` flags
 - default top-k limiting with optional `--top`
 - optional `--from`, `--subject`, and `--since` filters
+- tracked sender/recipient hints with `--tracked-sender`
 - post-fetch filtering against sender, subject, and body text
+- attachment filename and metadata extraction for matching invoice/payment-style searches
 - sender-address-aware keyword matching
 - clean `subject`, `cleanSubject`, and `bodyText` fields for message analysis
 - resilient per-message error handling with `skippedMessages`
 - persistent Markdown and JSON search artifacts in `search-results/`
 - optional Gmail SMTP sending with explicit recipient, subject, body, and dry-run support
+- persistent interaction contact index in `interaction-contacts/`
 
 ## Requirements
 
@@ -68,6 +71,7 @@ node scripts/scour.js \
   --keyword "payment" \
   --keyword "receipt" \
   --from "billing" \
+  --tracked-sender "customer@example.com" \
   --since "2026-01-01"
 ```
 
@@ -104,10 +108,12 @@ The script returns structured JSON with fields such as:
 - `processedMessages`
 - `skippedMessages`
 - `messages`
+- `sentEmailInteractions`
+- `contactArtifacts`
 - `emailActions`
 - `artifacts`
 
-Each message includes clean, readable fields such as `subject`, `cleanSubject`, `preview`, and `bodyText` so downstream agents can analyze the actual content.
+Each message includes clean, readable fields such as `subject`, `cleanSubject`, `preview`, and `bodyText` so downstream agents can analyze the actual content. Attachment metadata is exposed through `attachments` and `attachmentNames`.
 
 Each run also writes:
 
@@ -121,9 +127,17 @@ When an email send is requested, the script also records a sent-email ledger und
 - `sent-emails/latest.json`
 - timestamped JSON and Markdown records with recipient, subject, body, status, message ID, and error details when relevant
 
+Each run also updates an interaction contact index under `interaction-contacts/`:
+
+- `interaction-contacts/latest.md`
+- `interaction-contacts/latest.json`
+- timestamped JSON and Markdown records of senders and recipients found in inbox results, tracked sender hints, sent-email actions, and sent-email history
+
 ## Search Tips
 
 - Prefer a mixed keyword set for focused searches: topic terms, sender fragments, subject clues, and workflow terms.
+- Use `--tracked-sender` for known customer names, emails, or domains; tracked senders are searched across senders and recipients.
+- For invoice/payment hunts, include terms such as `invoice`, `receipt`, `paid`, `payment`, and known customer names because attachment filenames are included in post-fetch matching.
 - If a strict `--subject` filter yields no useful matches, relax it before widening everything else.
 - Broad terms like `application`, `update`, or `interview` are noisy unless paired with stronger contextual clues.
 - Keywords are matched against sender address/text, subject, and extracted body text.
@@ -136,3 +150,5 @@ When an email send is requested, the script also records a sent-email ledger und
 - Search artifacts are local runtime output and should not be committed.
 - Sent email attempts are recorded in the JSON and Markdown artifacts under `emailActions`.
 - Sent email records are also stored locally under `sent-emails/` and should not be committed.
+- Searches also inspect `sent-emails/` so recent outbound interactions can help identify customers even when the inbox query is sparse.
+- Interaction contact records are stored locally under `interaction-contacts/` and should not be committed.
