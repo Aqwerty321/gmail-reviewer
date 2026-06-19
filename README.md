@@ -59,10 +59,10 @@ Add optional filters when useful:
 
 ```bash
 node scripts/scour.js \
-  --keyword "toolhouse" \
-  --keyword "toolhouse.ai" \
-  --keyword "interview" \
-  --from "toolhouse" \
+  --keyword "invoice" \
+  --keyword "payment" \
+  --keyword "receipt" \
+  --from "billing" \
   --since "2026-01-01"
 ```
 
@@ -78,9 +78,9 @@ The script returns structured JSON with fields such as:
 
 ## Search Tips
 
-- Prefer a mixed keyword set for company hunts: company name, domain variant, sender fragment, and workflow terms.
+- Prefer a mixed keyword set for focused searches: topic terms, sender fragments, subject clues, and workflow terms.
 - If a strict `--subject` filter yields no useful matches, relax it before widening everything else.
-- Broad terms like `application` and `interview` are noisy unless paired with company-specific clues.
+- Broad terms like `application`, `update`, or `interview` are noisy unless paired with stronger contextual clues.
 - Keywords are matched against sender address/text, subject, and extracted body text.
 
 ## Notes
