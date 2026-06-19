@@ -67,7 +67,8 @@ function getConfigHelp() {
 function getArtifactPaths() {
   const rootDir = path.dirname(configPaths.envPath);
   const outputDir = path.join(rootDir, "search-results");
-  return { rootDir, outputDir };
+  const sentEmailDir = path.join(rootDir, "sent-emails");
+  return { rootDir, outputDir, sentEmailDir };
 }
 
 function normalizeKeywords(values) {
@@ -363,6 +364,50 @@ function formatFromAddress(email, fromName) {
   return `"${fromName.replace(/"/g, "'")}" <${email}>`;
 }
 
+function formatSentEmailMarkdown(record) {
+  const lines = [];
+  lines.push("# Sent Email Record");
+  lines.push("");
+  lines.push(`- Timestamp: ${record.timestamp}`);
+  lines.push(`- Status: ${record.status}`);
+  lines.push(`- Dry run: ${record.dryRun ? "yes" : "no"}`);
+  lines.push(`- From: ${record.from}`);
+  lines.push(`- To: ${record.to}`);
+  lines.push(`- Subject: ${record.subject}`);
+  lines.push(`- Message ID: ${record.messageId || "none"}`);
+
+  if (record.error) {
+    lines.push(`- Error: ${record.error}`);
+  }
+
+  lines.push("");
+  lines.push("## Body");
+  lines.push("");
+  lines.push(record.body || "(empty)");
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+async function persistSentEmailRecord(record) {
+  const { sentEmailDir } = getArtifactPaths();
+  const timestamp = record.timestamp.replace(/[:.]/g, "-");
+  const safeRecipient = record.to.replace(/[^a-z0-9@._-]/gi, "_");
+  const baseName = `${timestamp}_${safeRecipient}`;
+  const jsonPath = path.join(sentEmailDir, `${baseName}.json`);
+  const markdownPath = path.join(sentEmailDir, `${baseName}.md`);
+  const latestJsonPath = path.join(sentEmailDir, "latest.json");
+  const latestMarkdownPath = path.join(sentEmailDir, "latest.md");
+
+  await mkdir(sentEmailDir, { recursive: true });
+  await writeFile(jsonPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  await writeFile(latestJsonPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  await writeFile(markdownPath, formatSentEmailMarkdown(record), "utf8");
+  await writeFile(latestMarkdownPath, formatSentEmailMarkdown(record), "utf8");
+
+  return { jsonPath, markdownPath, latestJsonPath, latestMarkdownPath };
+}
+
 function formatSearchMarkdown(result) {
   const lines = [];
   lines.push("# Gmail Search Result");
@@ -466,7 +511,19 @@ async function sendEmails({ email, password, send }) {
 
   if (send.dryRun) {
     for (const to of send.to) {
-      actions.sent.push({ to, subject: send.subject, status: "dry-run", messageId: null });
+      const record = {
+        timestamp: new Date().toISOString(),
+        status: "dry-run",
+        dryRun: true,
+        from,
+        to,
+        subject: send.subject,
+        body: send.body,
+        messageId: null,
+        error: null
+      };
+      const artifacts = await persistSentEmailRecord(record);
+      actions.sent.push({ to, subject: send.subject, status: "dry-run", messageId: null, artifacts });
     }
     return actions;
   }
@@ -490,9 +547,34 @@ async function sendEmails({ email, password, send }) {
         text: send.body
       });
 
-      actions.sent.push({ to, subject: send.subject, status: "sent", messageId: response.messageId || null });
+      const record = {
+        timestamp: new Date().toISOString(),
+        status: "sent",
+        dryRun: false,
+        from,
+        to,
+        subject: send.subject,
+        body: send.body,
+        messageId: response.messageId || null,
+        error: null
+      };
+      const artifacts = await persistSentEmailRecord(record);
+      actions.sent.push({ to, subject: send.subject, status: "sent", messageId: response.messageId || null, artifacts });
     } catch (error) {
-      actions.failed.push({ to, subject: send.subject, message: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      const record = {
+        timestamp: new Date().toISOString(),
+        status: "failed",
+        dryRun: false,
+        from,
+        to,
+        subject: send.subject,
+        body: send.body,
+        messageId: null,
+        error: message
+      };
+      const artifacts = await persistSentEmailRecord(record);
+      actions.failed.push({ to, subject: send.subject, message, artifacts });
     }
   }
 

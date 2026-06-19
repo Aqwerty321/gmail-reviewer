@@ -115,6 +115,12 @@ Each run also writes:
 - `search-results/latest.json`
 - timestamped history files in `search-results/`
 
+When an email send is requested, the script also records a sent-email ledger under `sent-emails/`:
+
+- `sent-emails/latest.md`
+- `sent-emails/latest.json`
+- timestamped JSON and Markdown records with recipient, subject, body, status, message ID, and error details when relevant
+
 ## Search Tips
 
 - Prefer a mixed keyword set for focused searches: topic terms, sender fragments, subject clues, and workflow terms.
@@ -129,3 +135,4 @@ Each run also writes:
 - Missing or malformed config returns structured JSON with exact file paths and suggested copy commands.
 - Search artifacts are local runtime output and should not be committed.
 - Sent email attempts are recorded in the JSON and Markdown artifacts under `emailActions`.
+- Sent email records are also stored locally under `sent-emails/` and should not be committed.
