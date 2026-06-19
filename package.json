@@ -1,7 +1,7 @@
 {
   "name": "gmail-reviewer",
   "version": "1.0.0",
-  "description": "Scour a Gmail inbox for customer reviews using IMAP.",
+  "description": "Search a Gmail inbox for task-specific emails using IMAP.",
   "type": "module",
   "main": "scripts/scour.js",
   "scripts": {

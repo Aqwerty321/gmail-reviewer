@@ -1,6 +1,6 @@
 # gmail-reviewer
 
-`gmail-reviewer` is a Node.js Gmail IMAP search tool plus a workspace-local VS Code skill for agent-driven inbox triage.
+`gmail-reviewer` is a Node.js Gmail IMAP search tool for task-driven inbox triage.
 
 It connects to Gmail with an App Password, searches the inbox with repeated keyword filters, and returns structured JSON for the most relevant matching emails.
 
@@ -83,14 +83,7 @@ The script returns structured JSON with fields such as:
 - Broad terms like `application` and `interview` are noisy unless paired with company-specific clues.
 - Keywords are matched against sender address/text, subject, and extracted body text.
 
-## VS Code Skill
-
-A workspace-local skill lives at [`.github/skills/gmail-reviewer/SKILL.md`](.github/skills/gmail-reviewer/SKILL.md).
-
-That skill is intended for local use inside VS Code and is ignored by git through [`.gitignore`](.gitignore), along with local secrets in [`.env`](.env).
-
 ## Notes
 
 - Credentials are loaded from the nearest `.env` file the script can find.
 - Missing or malformed config returns structured JSON with exact file paths and suggested copy commands.
-- The local skill and the root script are kept in sync in this workspace.
