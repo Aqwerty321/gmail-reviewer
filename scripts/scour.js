@@ -9,8 +9,11 @@ import * as cheerio from "cheerio";
 import dotenv from "dotenv";
 
 const DEFAULT_KEYWORD = "review";
-const MAX_RESULTS = 20;
-const MAX_CANDIDATES = 200;
+const DEFAULT_TOP = 10;
+const MAX_CANDIDATE_MULTIPLIER = 10;
+const MAX_CANDIDATES_CAP = 500;
+const MAX_BODY_TEXT_LENGTH = 5000;
+const DEFAULT_SEARCH_VARIANTS = ["body", "subject", "from"];
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -86,6 +89,20 @@ function normalizeSince(value) {
   return normalized;
 }
 
+function normalizeTop(value) {
+  if (value === undefined) {
+    return DEFAULT_TOP;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error("Invalid --top value. Use a positive integer such as 10.");
+  }
+
+  return parsed;
+}
+
 function parseCliArgs() {
   const { values } = parseArgs({
     options: {
@@ -94,7 +111,8 @@ function parseCliArgs() {
       keyword: { type: "string", multiple: true },
       from: { type: "string" },
       subject: { type: "string" },
-      since: { type: "string" }
+      since: { type: "string" },
+      top: { type: "string" }
     }
   });
 
@@ -104,7 +122,8 @@ function parseCliArgs() {
     keywords: normalizeKeywords(values.keyword),
     from: normalizeOptionalString(values.from),
     subject: normalizeOptionalString(values.subject),
-    since: normalizeSince(values.since)
+    since: normalizeSince(values.since),
+    top: normalizeTop(values.top)
   };
 }
 
@@ -118,6 +137,7 @@ function createResult(overrides = {}) {
       subject: null,
       since: null
     },
+    top: DEFAULT_TOP,
     config: getConfigHelp(),
     searchesRun: [],
     matchedMessages: 0,
@@ -165,7 +185,11 @@ async function downloadSource(client, uid) {
 }
 
 function cleanMessageText(parsedMessage) {
-  const html = parsedMessage.html || parsedMessage.textAsHtml || parsedMessage.text || "";
+  if (parsedMessage.text) {
+    return parsedMessage.text.replace(/\s+/g, " ").trim();
+  }
+
+  const html = parsedMessage.html || parsedMessage.textAsHtml || "";
   const $ = cheerio.load(html);
 
   return $.text().replace(/\s+/g, " ").trim();
@@ -229,8 +253,38 @@ function buildPreview(text) {
   return text.slice(0, 280) || null;
 }
 
-function buildSearchCriteria(keyword, filters) {
-  const criteria = { body: keyword };
+function buildCleanBody(text) {
+  if (!text) {
+    return {
+      bodyText: null,
+      bodyTruncated: false
+    };
+  }
+
+  return {
+    bodyText: text.slice(0, MAX_BODY_TEXT_LENGTH),
+    bodyTruncated: text.length > MAX_BODY_TEXT_LENGTH
+  };
+}
+
+function buildCandidateLimit(top) {
+  return Math.min(Math.max(top * MAX_CANDIDATE_MULTIPLIER, top), MAX_CANDIDATES_CAP);
+}
+
+function buildSearchVariants(keyword, filters) {
+  if (filters.from && keyword.toLowerCase() === filters.from.toLowerCase()) {
+    return ["from"];
+  }
+
+  if (keyword.includes("@")) {
+    return ["from", "subject", "body"];
+  }
+
+  return DEFAULT_SEARCH_VARIANTS;
+}
+
+function buildSearchCriteria(keyword, filters, variant) {
+  const criteria = { [variant]: keyword };
 
   if (filters.from) {
     criteria.from = filters.from;
@@ -247,10 +301,16 @@ function buildSearchCriteria(keyword, filters) {
   return criteria;
 }
 
-async function scourInbox({ email, password, keywords, from, subject, since }) {
+function getCurrentDateString() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function scourInbox({ email, password, keywords, from, subject, since, top }) {
   validateInputs({ email, password });
 
   const filters = { from, subject, since };
+  const candidateLimit = buildCandidateLimit(top);
+  const groundedToday = getCurrentDateString();
 
   const client = new ImapFlow({
     host: "imap.gmail.com",
@@ -265,29 +325,69 @@ async function scourInbox({ email, password, keywords, from, subject, since }) {
 
   client.on("error", () => {});
 
-  const result = createResult({ email, keywords, filters });
+  const result = createResult({
+    email,
+    keywords,
+    filters,
+    top,
+    queryContext: {
+      groundedToday,
+      effectiveSince: since,
+      candidateLimit
+    }
+  });
 
   try {
     await client.connect();
-    await client.mailboxOpen("INBOX");
+    const mailbox = await client.mailboxOpen("INBOX");
 
     const searchMap = new Map();
 
     for (const keyword of keywords) {
-      const criteria = buildSearchCriteria(keyword, filters);
-      const matchingUids = await client.search(criteria);
-      result.searchesRun.push({ keyword, criteria: { ...filters }, matches: matchingUids.length });
+      const variants = buildSearchVariants(keyword, filters);
 
-      for (const uid of matchingUids) {
-        const entry = searchMap.get(uid) ?? { uid, matchedKeywords: new Set() };
-        entry.matchedKeywords.add(keyword);
-        searchMap.set(uid, entry);
+      for (const variant of variants) {
+        const criteria = buildSearchCriteria(keyword, filters, variant);
+        const matchingUids = await client.search(criteria);
+        result.searchesRun.push({ keyword, variant, criteria: { ...filters }, matches: matchingUids.length });
+
+        for (const uid of matchingUids) {
+          const entry = searchMap.get(uid) ?? { uid, matchedKeywords: new Set() };
+          entry.matchedKeywords.add(keyword);
+          searchMap.set(uid, entry);
+        }
       }
+    }
+
+    if (searchMap.size < candidateLimit) {
+      const startSequence = Math.max(1, mailbox.exists - candidateLimit + 1);
+      const recentSequenceRange = `${startSequence}:*`;
+
+      for await (const message of client.fetch(recentSequenceRange, { uid: true })) {
+        if (!message.uid) {
+          continue;
+        }
+
+        const entry = searchMap.get(message.uid) ?? { uid: message.uid, matchedKeywords: new Set() };
+        searchMap.set(message.uid, entry);
+      }
+
+      result.searchesRun.push({
+        keyword: "__recent_fallback__",
+        variant: "sequence-window",
+        criteria: {
+          from: null,
+          subject: null,
+          since: filters.since
+        },
+        matches: mailbox.exists,
+        inspectedRange: recentSequenceRange
+      });
     }
 
     const recentUids = [...searchMap.values()]
       .sort((first, second) => second.uid - first.uid)
-      .slice(0, MAX_CANDIDATES);
+      .slice(0, candidateLimit);
 
     result.matchedMessages = searchMap.size;
     result.processedMessages = 0;
@@ -299,21 +399,25 @@ async function scourInbox({ email, password, keywords, from, subject, since }) {
         const parsedMessage = await simpleParser(source);
         const text = cleanMessageText(parsedMessage);
         const subject = parsedMessage.subject || "";
-        const { matches, matchedKeywords } = messageMatchesFilters(parsedMessage, text, [...entry.matchedKeywords], filters);
+        const { matches, matchedKeywords } = messageMatchesFilters(parsedMessage, text, keywords, filters);
 
         if (!matches) {
           continue;
         }
 
         const extracted = extractSignals(text, matchedKeywords);
+        const { bodyText, bodyTruncated } = buildCleanBody(text);
 
         result.messages.push({
           uid: entry.uid,
           subject: subject || null,
+          cleanSubject: subject.trim() || null,
           from: parsedMessage.from?.text || null,
           date: parsedMessage.date?.toISOString() || null,
           matchedKeywords,
           preview: buildPreview(text),
+          bodyText,
+          bodyTruncated,
           reviewer: extracted.reviewer,
           review: extracted.review,
           rating: extracted.rating,
@@ -327,7 +431,7 @@ async function scourInbox({ email, password, keywords, from, subject, since }) {
         continue;
       }
 
-      if (result.messages.length >= MAX_RESULTS) {
+      if (result.messages.length >= top) {
         break;
       }
     }
@@ -350,7 +454,8 @@ async function main() {
     keywords: [DEFAULT_KEYWORD],
     from: null,
     subject: null,
-    since: null
+    since: null,
+    top: DEFAULT_TOP
   };
 
   try {
@@ -366,6 +471,12 @@ async function main() {
         from: args.from,
         subject: args.subject,
         since: args.since
+      },
+      top: args.top,
+      queryContext: {
+        groundedToday: getCurrentDateString(),
+        effectiveSince: args.since,
+        candidateLimit: buildCandidateLimit(args.top)
       },
       error: {
         message

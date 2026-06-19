@@ -9,9 +9,11 @@ It connects to Gmail with an App Password, searches the inbox with repeated keyw
 - Gmail IMAP search with `imapflow`
 - `.env`-based credential loading
 - repeated `--keyword` flags
+- default top-k limiting with optional `--top`
 - optional `--from`, `--subject`, and `--since` filters
 - post-fetch filtering against sender, subject, and body text
 - sender-address-aware keyword matching
+- clean `subject`, `cleanSubject`, and `bodyText` fields for message analysis
 - resilient per-message error handling with `skippedMessages`
 
 ## Requirements
@@ -52,13 +54,14 @@ GMAIL_APP_PASSWORD=your16digitapppassword
 Run the extractor directly:
 
 ```bash
-node scripts/scour.js --keyword "invoice" --keyword "receipt"
+node scripts/scour.js --top 10 --keyword "invoice" --keyword "receipt"
 ```
 
 Add optional filters when useful:
 
 ```bash
 node scripts/scour.js \
+  --top 5 \
   --keyword "invoice" \
   --keyword "payment" \
   --keyword "receipt" \
@@ -70,11 +73,14 @@ The script returns structured JSON with fields such as:
 
 - `keywords`
 - `filters`
+- `top`
 - `searchesRun`
 - `matchedMessages`
 - `processedMessages`
 - `skippedMessages`
 - `messages`
+
+Each message includes clean, readable fields such as `subject`, `cleanSubject`, `preview`, and `bodyText` so downstream agents can analyze the actual content.
 
 ## Search Tips
 

@@ -21,13 +21,15 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 4. After creating `.env`, tell the user the exact `.env` path in their workspace and explicitly ask them to open it on their machine and fill in `GMAIL_EMAIL` and `GMAIL_APP_PASSWORD` before continuing.
 5. If credentials are still missing or malformed, stop the search, show the user the exact `.env` and `.env.example` paths, and tell them what value is missing.
 6. The extractor sanitizes whitespace in the configured App Password automatically.
-7. Translate the user's task into a search plan. Choose 2-6 likely inbox keywords or short phrases, and infer optional `from`, `subject`, and `since` filters when the request suggests them. If those constraints would help but are not clear, ask the user a brief follow-up before running the search.
-8. For company or recruiter hunts, prefer a mixed keyword set: company name, domain variant, sender-address fragment, and one or two workflow terms. Example: `toolhouse`, `toolhouseai`, `toolhouse.ai`, `@toolhouseai.com`, `interview`, `application`.
-9. Run the extractor from this folder with the inferred filters. Credentials should come from `.env` by default:
-   `node scripts/scour.js --keyword "invoice" --keyword "receipt" --from "billing@example.com" --subject "payment" --since "2026-01-01"`
-10. Review the JSON output. If the first pass is too broad or too narrow, refine keywords and filters, then rerun the extractor.
-11. Repeat the search loop until the returned messages fit the user's task.
-12. Summarize the matching emails clearly for the user.
+7. Ground relative dates before searching. Convert requests like "past week", "last month", or "since yesterday" into an explicit `YYYY-MM-DD` value using the current date at runtime, and pass that absolute date through `--since`.
+8. Translate the user's task into a search plan. Choose 2-6 likely inbox keywords or short phrases, and infer optional `from`, `subject`, and `since` filters when the request suggests them. If those constraints would help but are not clear, ask the user a brief follow-up before running the search.
+9. For company or recruiter hunts, prefer a mixed keyword set: company name, domain variant, sender-address fragment, and one or two workflow terms. Example: `toolhouse`, `toolhouseai`, `toolhouse.ai`, `@toolhouseai.com`, `interview`, `application`.
+10. Always use a result limit. The extractor defaults to `--top 10` when not specified, but set `--top` explicitly when the task calls for a different number of matches.
+11. Run the extractor from this folder with the inferred filters. Credentials should come from `.env` by default:
+   `node scripts/scour.js --top 10 --keyword "invoice" --keyword "receipt" --from "billing@example.com" --subject "payment" --since "2026-01-01"`
+12. Review the JSON output. Each returned result includes `queryContext.groundedToday` and `queryContext.effectiveSince` for date grounding, plus clean `subject`, `cleanSubject`, and normalized `bodyText` so the agent can analyze and summarize the actual message contents instead of only a snippet. If the first pass is too broad or too narrow, refine keywords and filters, then rerun the extractor.
+13. Repeat the search loop until the returned messages fit the user's task.
+14. Summarize the matching emails clearly for the user, using the clean subject and body text fields.
 
 ## Learned Tactics
 - IMAP body searches are noisy, so trust the extractor's post-fetch filtering more than raw match counts.
@@ -39,6 +41,8 @@ Use this skill to connect to Gmail over IMAP, generate task-specific keyword fil
 
 ## Notes
 - The extractor supports repeated `--keyword` flags and unions the matches across searches.
+- Each keyword is searched across message body, subject, and sender fields before post-fetch filtering is applied.
+- The extractor defaults to the top 10 matching results unless `--top` is specified.
 - The agent is expected to generate and refine keyword, sender, subject, and date filters interactively from the user's request rather than relying on `.env` for those values.
 - The agent should handhold setup: create `.env` from `.env.example` when missing, point the user at the exact file path, and pause until the user fills credentials locally.
 - The script loads credentials from the nearest `.env` file it can find, and prints structured JSON to stdout for both success and failure cases.
