@@ -16,6 +16,7 @@ It connects to Gmail with an App Password, searches the inbox with repeated keyw
 - clean `subject`, `cleanSubject`, and `bodyText` fields for message analysis
 - resilient per-message error handling with `skippedMessages`
 - persistent Markdown and JSON search artifacts in `search-results/`
+- optional Gmail SMTP sending with explicit recipient, subject, body, and dry-run support
 
 ## Requirements
 
@@ -70,6 +71,29 @@ node scripts/scour.js \
   --since "2026-01-01"
 ```
 
+Send an email explicitly when needed:
+
+```bash
+node scripts/scour.js \
+  --top 5 \
+  --keyword "customer" \
+  --send-to "customer@example.com" \
+  --send-subject "Quick request" \
+  --send-body "Thanks for working with us. Would you be open to leaving a review?"
+```
+
+Preview the send action without sending mail:
+
+```bash
+node scripts/scour.js \
+  --top 1 \
+  --keyword "customer" \
+  --send-to "customer@example.com" \
+  --send-subject "Quick request" \
+  --send-body "Thanks for working with us. Would you be open to leaving a review?" \
+  --dry-run-send
+```
+
 The script returns structured JSON with fields such as:
 
 - `keywords`
@@ -80,6 +104,7 @@ The script returns structured JSON with fields such as:
 - `processedMessages`
 - `skippedMessages`
 - `messages`
+- `emailActions`
 - `artifacts`
 
 Each message includes clean, readable fields such as `subject`, `cleanSubject`, `preview`, and `bodyText` so downstream agents can analyze the actual content.
@@ -96,9 +121,11 @@ Each run also writes:
 - If a strict `--subject` filter yields no useful matches, relax it before widening everything else.
 - Broad terms like `application`, `update`, or `interview` are noisy unless paired with stronger contextual clues.
 - Keywords are matched against sender address/text, subject, and extracted body text.
+- Only send emails with explicit recipient, subject, and body flags. Use `--dry-run-send` before real outreach when validating a workflow.
 
 ## Notes
 
 - Credentials are loaded from the nearest `.env` file the script can find.
 - Missing or malformed config returns structured JSON with exact file paths and suggested copy commands.
 - Search artifacts are local runtime output and should not be committed.
+- Sent email attempts are recorded in the JSON and Markdown artifacts under `emailActions`.

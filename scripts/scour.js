@@ -8,6 +8,7 @@ import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import * as cheerio from "cheerio";
 import dotenv from "dotenv";
+import nodemailer from "nodemailer";
 
 const DEFAULT_KEYWORD = "review";
 const DEFAULT_TOP = 10;
@@ -75,6 +76,11 @@ function normalizeKeywords(values) {
   return cleaned.length > 0 ? [...new Set(cleaned)] : [DEFAULT_KEYWORD];
 }
 
+function normalizeRecipients(values) {
+  const entries = (values ?? []).flatMap((value) => value.split(","));
+  return [...new Set(entries.map((value) => value.trim()).filter(Boolean))];
+}
+
 function normalizeOptionalString(value) {
   const normalized = value?.trim();
   return normalized ? normalized : null;
@@ -119,7 +125,12 @@ function parseCliArgs() {
       from: { type: "string" },
       subject: { type: "string" },
       since: { type: "string" },
-      top: { type: "string" }
+      top: { type: "string" },
+      "send-to": { type: "string", multiple: true },
+      "send-subject": { type: "string" },
+      "send-body": { type: "string" },
+      "send-from-name": { type: "string" },
+      "dry-run-send": { type: "boolean" }
     }
   });
 
@@ -130,7 +141,14 @@ function parseCliArgs() {
     from: normalizeOptionalString(values.from),
     subject: normalizeOptionalString(values.subject),
     since: normalizeSince(values.since),
-    top: normalizeTop(values.top)
+    top: normalizeTop(values.top),
+    send: {
+      to: normalizeRecipients(values["send-to"]),
+      subject: normalizeOptionalString(values["send-subject"]),
+      body: normalizeOptionalString(values["send-body"]),
+      fromName: normalizeOptionalString(values["send-from-name"]),
+      dryRun: Boolean(values["dry-run-send"])
+    }
   };
 }
 
@@ -152,6 +170,12 @@ function createResult(overrides = {}) {
     processedMessages: 0,
     skippedMessages: [],
     messages: [],
+    emailActions: {
+      requested: false,
+      dryRun: false,
+      sent: [],
+      failed: []
+    },
     error: null,
     ...overrides
   };
@@ -164,6 +188,20 @@ function validateInputs({ email, password }) {
 
   if (!password) {
     throw new Error(`Missing Gmail App Password. Open ${configPaths.envPath} and set GMAIL_APP_PASSWORD, or pass --password.`);
+  }
+}
+
+function validateSendRequest(send) {
+  if (!send || send.to.length === 0) {
+    return;
+  }
+
+  if (!send.subject) {
+    throw new Error("Missing --send-subject for requested outbound email.");
+  }
+
+  if (!send.body) {
+    throw new Error("Missing --send-body for requested outbound email.");
   }
 }
 
@@ -317,6 +355,14 @@ function getTimestampLabel() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+function formatFromAddress(email, fromName) {
+  if (!fromName) {
+    return email;
+  }
+
+  return `"${fromName.replace(/"/g, "'")}" <${email}>`;
+}
+
 function formatSearchMarkdown(result) {
   const lines = [];
   lines.push("# Gmail Search Result");
@@ -334,6 +380,9 @@ function formatSearchMarkdown(result) {
   lines.push(`- Downloaded/processed messages: ${result.processedMessages}`);
   lines.push(`- Returned messages: ${result.messages.length}`);
   lines.push(`- Skipped messages: ${result.skippedMessages.length}`);
+  lines.push(`- Emails requested: ${result.emailActions.requested ? "yes" : "no"}`);
+  lines.push(`- Emails sent: ${result.emailActions.sent.length}`);
+  lines.push(`- Email send failures: ${result.emailActions.failed.length}`);
   lines.push("");
 
   if (result.error) {
@@ -379,7 +428,75 @@ function formatSearchMarkdown(result) {
     lines.push("");
   }
 
+  if (result.emailActions.requested) {
+    lines.push("## Email Actions");
+    lines.push("");
+    lines.push(`- Dry run: ${result.emailActions.dryRun ? "yes" : "no"}`);
+
+    for (const sent of result.emailActions.sent) {
+      lines.push(`- ${sent.status}: ${sent.to} (${sent.messageId || "no message id"})`);
+    }
+
+    for (const failed of result.emailActions.failed) {
+      lines.push(`- failed: ${failed.to} - ${failed.message}`);
+    }
+
+    lines.push("");
+  }
+
   return `${lines.join("\n").trim()}\n`;
+}
+
+async function sendEmails({ email, password, send }) {
+  validateSendRequest(send);
+
+  const requested = send.to.length > 0;
+  const actions = {
+    requested,
+    dryRun: send.dryRun,
+    sent: [],
+    failed: []
+  };
+
+  if (!requested) {
+    return actions;
+  }
+
+  const from = formatFromAddress(email, send.fromName);
+
+  if (send.dryRun) {
+    for (const to of send.to) {
+      actions.sent.push({ to, subject: send.subject, status: "dry-run", messageId: null });
+    }
+    return actions;
+  }
+
+  const transport = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: {
+      user: email,
+      pass: password.replace(/\s+/g, "")
+    }
+  });
+
+  for (const to of send.to) {
+    try {
+      const response = await transport.sendMail({
+        from,
+        to,
+        subject: send.subject,
+        text: send.body
+      });
+
+      actions.sent.push({ to, subject: send.subject, status: "sent", messageId: response.messageId || null });
+    } catch (error) {
+      actions.failed.push({ to, subject: send.subject, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  return actions;
 }
 
 async function persistResultArtifacts(result) {
@@ -415,8 +532,9 @@ async function persistResultArtifacts(result) {
   return artifacts;
 }
 
-async function scourInbox({ email, password, keywords, from, subject, since, top }) {
+async function scourInbox({ email, password, keywords, from, subject, since, top, send }) {
   validateInputs({ email, password });
+  validateSendRequest(send);
 
   const filters = { from, subject, since };
   const candidateLimit = buildCandidateLimit(top);
@@ -559,6 +677,7 @@ async function scourInbox({ email, password, keywords, from, subject, since, top
     }
 
     result.ok = true;
+  result.emailActions = await sendEmails({ email, password, send });
     return result;
   } finally {
     if (client.usable) {
@@ -577,7 +696,14 @@ async function main() {
     from: null,
     subject: null,
     since: null,
-    top: DEFAULT_TOP
+    top: DEFAULT_TOP,
+    send: {
+      to: [],
+      subject: null,
+      body: null,
+      fromName: null,
+      dryRun: false
+    }
   };
 
   try {
@@ -600,6 +726,12 @@ async function main() {
         groundedToday: getCurrentDateString(),
         effectiveSince: args.since,
         candidateLimit: buildCandidateLimit(args.top)
+      },
+      emailActions: {
+        requested: args.send?.to?.length > 0,
+        dryRun: Boolean(args.send?.dryRun),
+        sent: [],
+        failed: []
       },
       error: {
         message
